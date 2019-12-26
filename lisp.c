@@ -2,14 +2,23 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <math.h>
 #include <assert.h>
 
 #ifdef USE_READLINE
 #include <readline/readline.h>
+#include <readline/history.h>
 #endif
 
 #define SYMBOL_MAXLEN 30
-const char *NON_SYMBOL_CHARS = ")\".";
+/* These characters, as well as spaces, are not allowed in symbols. */
+const char *NON_SYMBOL_CHARS = "'()\".";
+
+enum error {
+	ERR_NONE,
+	ERR_PARSE,
+	ERR_USER
+};
 
 enum type {
 	T_SYMBOL,
@@ -81,8 +90,14 @@ struct expr *make_number(double number);
 struct expr *get_variable(const char *symbol);
 void set_variable(const char *symbol, struct expr *value);
 void create_builtin(const char *symbol, func_t func, int sf);
+void create_function(const char *symbol, const char *params, const char *body);
 
+struct expr *expr_copy(struct expr *e);
+
+struct expr *replace_symbol(struct expr *exp, const char *sym, struct expr *val);
 struct expr *eval_each(struct expr *list);
+struct expr *eval_lambda(struct lambda *lambda, struct expr *args);
+struct expr *eval_funcall(struct expr *f, struct expr *args);
 struct expr *eval_expr(struct expr *e);
 
 void print_expr(struct expr *e, FILE *f);
@@ -100,13 +115,25 @@ struct expr *list_index(struct expr *list, unsigned int idx);
 int check_arg_count(struct expr *list, unsigned int l);
 
 struct expr *bi_define(struct expr *args);
+struct expr *bi_lambda(struct expr *args);
+struct expr *bi_if(struct expr *args);
+struct expr *bi_apply(struct expr *args);
 struct expr *bi_quote(struct expr *args);
 struct expr *bi_cons(struct expr *args);
 struct expr *bi_car(struct expr *args);
 struct expr *bi_cdr(struct expr *args);
 struct expr *bi_eq(struct expr *args);
 struct expr *bi_list(struct expr *args);
+struct expr *bi_append(struct expr *args);
 struct expr *bi_sum(struct expr *args);
+struct expr *bi_prod(struct expr *args);
+struct expr *bi_diff(struct expr *args);
+struct expr *bi_quot(struct expr *args);
+struct expr *bi_pow(struct expr *args);
+struct expr *bi_and(struct expr *args);
+struct expr *bi_or(struct expr *args);
+struct expr *bi_pair(struct expr *args);
+struct expr *bi_debug(struct expr *args);
 
 /* All global state. Can later pass around a pointer to this.
  */
@@ -117,9 +144,15 @@ struct globals {
 	struct expr **exprs;
 	size_t exprs_size;
 	size_t exprs_count;
+	enum error error;
+	int debug;
 	struct variable *variables;
+	struct expr *TRUE;
+	struct expr *FALSE;
 } globals;
 
+/* Initialize all global state.
+ */
 void init_globals(void) {
 	globals.symbols_size = 100;
 	globals.symbols = malloc(globals.symbols_size * sizeof *globals.symbols);
@@ -128,17 +161,50 @@ void init_globals(void) {
 	globals.exprs = malloc(globals.exprs_size * sizeof *globals.exprs);
 	globals.exprs_count = 0;
 	globals.variables = NULL;
+	globals.error = ERR_NONE;
+	globals.debug = 0;
+	globals.TRUE = make_symbol("true");
+	set_variable(save_symbol("true"), globals.TRUE);
+	globals.FALSE = make_symbol("false");
+	set_variable(save_symbol("false"), globals.FALSE);
 	/* create built-in variables */
 	set_variable(save_symbol("pi"),
 		     make_number(3.14159265358979323846));
 	create_builtin("define", bi_define, 1);
+	create_builtin("lambda", bi_lambda, 1);
+	create_builtin("if", bi_if, 1);
+	create_builtin("apply", bi_apply, 0);
 	create_builtin("quote", bi_quote, 1);
 	create_builtin("cons", bi_cons, 0);
 	create_builtin("car", bi_car, 0);
 	create_builtin("cdr", bi_cdr, 0);
 	create_builtin("eq", bi_eq, 0);
 	create_builtin("list", bi_list, 0);
+	create_builtin("append", bi_append, 0);
 	create_builtin("+", bi_sum, 0);
+	create_builtin("*", bi_prod, 0);
+	create_builtin("-", bi_diff, 0);
+	create_builtin("/", bi_quot, 0);
+	create_builtin("^", bi_pow, 0);
+	create_builtin("and", bi_and, 1);
+	create_builtin("or", bi_or, 1);
+	create_builtin("pair", bi_pair, 0);
+	create_builtin("debug", bi_debug, 0);
+	create_function("not", "(e)", "(if e false true)");
+	create_function("null", "(e)", "(eq e ())");
+	create_function("equal",
+			"(x y)",
+			"(if (and (pair x) (pair y)) (and (equal (car x) (car y)) (equal (cdr x) (cdr y))) (eq x y))");
+	create_function("map",
+			"(f lst)",
+			"(if (null lst) () (cons (f (car lst)) (map f (cdr lst))))");
+	create_function("length",
+			"(lst)",
+			"(apply + (map (lambda (e) 1) lst))");
+	/* create_function("reverse", "(lst)", "" */
+	create_function("member",
+			"(e lst)",
+			"(if (null lst) false (or (equal e (car lst)) (member e (cdr lst))))");
 }
 
 /* Free a single expression.
@@ -273,6 +339,20 @@ struct expr *make_number(double value)
 	return e;
 }
 
+/* Construct a new lambda.
+ */
+struct expr *make_lambda(struct expr *params, struct expr *body)
+{
+	struct expr *e = malloc(sizeof *e);
+	e->refs = 0;
+	e->type = T_LAMBDA;
+	e->data.lambda.params = params;
+	e->data.lambda.body = body;
+	return e;
+}
+
+/* Get the value of a variable.
+ */
 struct expr *get_variable(const char *symbol)
 {
 	struct variable *v = globals.variables;
@@ -291,9 +371,12 @@ struct expr *get_variable(const char *symbol)
 		}
 	}
 	fprintf(stderr, "Undefined variable %s!\n", symbol);
+	globals.error = ERR_USER;
 	return NULL;
 }
 
+/* Set the value of a variable.
+ */
 void set_variable(const char *symbol, struct expr *value)
 {
 	struct variable **v = &globals.variables;
@@ -330,7 +413,8 @@ void set_variable(const char *symbol, struct expr *value)
 
 /* Save a builtin as a variable.
  */
-void create_builtin(const char *symbol, func_t func, int sf) {
+void create_builtin(const char *symbol, func_t func, int sf)
+{
 	struct expr *builtin = malloc(sizeof *builtin);
 	builtin->type = T_BUILTIN;
 	builtin->refs = 0;
@@ -339,6 +423,75 @@ void create_builtin(const char *symbol, func_t func, int sf) {
 	symbol = save_symbol(symbol);
 	builtin->data.builtin.name = symbol;
 	set_variable(symbol, builtin);
+}
+
+/* Save a function. Reads parameters and body from strings.
+ */
+void create_function(const char *symbol, const char *params, const char *body)
+{
+	struct expr *ps;
+	struct expr *b;
+	const char *endptr;
+	ps = read_list(params, &endptr);
+	assert(*endptr == '\0');
+	b = read_list(body, &endptr);
+	assert(*endptr == '\0');
+	symbol = save_symbol(symbol);
+	set_variable(symbol, make_lambda(ps, b));
+}
+
+/* Create a deep copy of a list.
+ */
+struct expr *expr_copy(struct expr *e)
+{
+	if (!e)
+		return NULL;
+	switch (e->type) {
+	case T_SYMBOL:
+	case T_NUMBER:
+	case T_BUILTIN:
+	case T_LAMBDA:
+		return e;
+	case T_STRING:
+		return make_string(e->data.string, strlen(e->data.string));
+	case T_PAIR:
+		return make_pair(expr_copy(e->data.pair.car),
+				 expr_copy(e->data.pair.cdr));
+	}
+}
+
+/* Recursively replace all occurences of sym in exp with val.
+ * Assumes that sym is "saved" so that pointer comparison can be done.
+ */
+struct expr *replace_symbol(struct expr *exp, const char *sym, struct expr *val)
+{
+	if (!exp)
+		return NULL;
+	if (exp->type == T_SYMBOL) {
+		if (exp->data.symbol == sym) {
+			if (val && val->type == T_PAIR) {
+				/* really ugly hack,
+				   TODO rewrite lambdas entirely */
+				val = make_pair(make_symbol("quote"),
+						make_pair(val, NULL));
+			}
+			return val;
+		} else {
+			return exp;
+		}
+	} else if (exp->type == T_PAIR) {
+		struct expr *car = replace_symbol(exp->data.pair.car, sym, val);
+		struct expr *cdr = replace_symbol(exp->data.pair.cdr, sym, val);
+		if (car != exp->data.pair.car || cdr != exp->data.pair.cdr)
+			/* if car or cdr changed, we need to
+			   construct a new pair */
+			/* TODO reference counting */
+			return make_pair(car, cdr);
+		else
+			return exp;
+	} else {
+		return exp;
+	}
 }
 
 /* Evaluate each element of the list. Used for arguments to functions.
@@ -356,10 +509,62 @@ struct expr *eval_each(struct expr *list)
 	return result;
 }
 
+struct expr *eval_lambda(struct lambda *lambda, struct expr *args)
+{
+	struct expr *result = lambda->body;
+	struct expr *param = lambda->params;
+	unsigned int param_count = list_length(lambda->params);
+	if (check_arg_count(args, param_count))
+		return NULL;
+	while (param) {
+		/* replace a single parameter with its argument value */
+		struct expr *sym;
+		struct expr *arg;
+		assert(param->type == T_PAIR && args->type == T_PAIR);
+		sym = param->data.pair.car;
+		assert(sym->type == T_SYMBOL);
+		arg = args->data.pair.car;
+		result = replace_symbol(result, sym->data.symbol, arg);
+		param = param->data.pair.cdr;
+		args = args->data.pair.cdr;
+	}
+	if (globals.debug) {
+		fprintf(stderr, "Evaluating lambda: ");
+		print_expr(result, stderr);
+		putc('\n', stderr);
+	}
+	return eval_expr(result);
+}
+
+struct expr *eval_funcall(struct expr *f, struct expr *args)
+{
+	if (!f) {
+		fprintf(stderr, "Trying to call non-function nil!\n");
+		globals.error = ERR_USER;
+		return NULL;
+	} if (f->type == T_BUILTIN) {
+		/* if it's not a special form
+		   the arguments are evaluated if non-null */
+		if (!f->data.builtin.spec_form)
+			args = eval_each(args);
+		return f->data.builtin.func(args);
+	} else if (f->type == T_LAMBDA) {
+		args = eval_each(args);
+		return eval_lambda(&f->data.lambda, args);
+	} else {
+		fprintf(stderr,
+			"Trying to call non-function of type %s!\n",
+			TYPE_NAMES[f->type]);
+		globals.error = ERR_USER;
+		return NULL;
+	}
+}
+
 /* Evaluate an expression.
  */
 struct expr *eval_expr(struct expr *e)
 {
+	/* TODO reference counting */
 	if (!e) {
 		return NULL;
 	} else if (e->type == T_SYMBOL) {
@@ -367,24 +572,7 @@ struct expr *eval_expr(struct expr *e)
 	} else if (e->type == T_PAIR) {
 		struct expr *f = eval_expr(e->data.pair.car);
 		struct expr *args = e->data.pair.cdr;
-		if (!f) {
-			fprintf(stderr, "Trying to call non-function nil!\n");
-			return NULL;
-		} if (f->type == T_BUILTIN) {
-			/* if it's not a special form
-			   the arguments are evaluated if non-null */
-			if (!f->data.builtin.spec_form)
-				args = eval_each(args);
-			return f->data.builtin.func(args);
-		} else if (f->type == T_LAMBDA) {
-			return NULL;
-		} else {
-			fprintf(stderr, "Whooops\n");
-			fprintf(stderr,
-				"Trying to call non-function of type %s!\n",
-				TYPE_NAMES[f->type]);
-			return NULL;
-		}
+		return eval_funcall(f, args);
 	} else {
 		return e;
 	}
@@ -427,7 +615,11 @@ void print_expr(struct expr *e, FILE *f)
 			fprintf(f, "[builtin %s]", e->data.builtin.name);
 			break;
 		case T_LAMBDA:
-			fprintf(f, "(lambda ...)");
+			fprintf(f, "(lambda ");
+			print_expr(e->data.lambda.params, f);
+			putc(' ', f);
+			print_expr(e->data.lambda.body, f);
+			putc(')', f);
 			break;
 		}
 	}
@@ -476,6 +668,7 @@ struct expr *read_list(const char *text, const char **endptr)
 	while (*text != ')') {
 		if (!*text) {
 			fprintf(stderr, "Unexpected end of input!\n");
+			globals.error = ERR_PARSE;
 			return NULL;
 		}
 		*f = make_pair(read_expr(text, &text), NULL);
@@ -494,6 +687,13 @@ struct expr *read_list(const char *text, const char **endptr)
 	return e;
 }
 
+int is_symbol_char(char c)
+{
+	return c != '\0'
+		&& !isspace(c)
+		&& !strchr(NON_SYMBOL_CHARS, c);
+}
+
 /* Read a symbol.
  * Symbols are terminated by spaces or chars in NON_SYMBOL_CHARS.
  */
@@ -502,15 +702,16 @@ struct expr *read_symbol(const char *text, const char **endptr)
 	char buf[SYMBOL_MAXLEN];
 	struct expr *symbol;
 	size_t i = 0;
-	while (!isspace(*text)
-	       && !strchr(NON_SYMBOL_CHARS, *text)) {
+	while (is_symbol_char(*text)) {
 		if (!*text) {
 			fprintf(stderr, "Unexpected end of input!\n");
+			globals.error = ERR_PARSE;
 			return NULL;
 		}
 		buf[i++] = *text++;
 		if (i >= SYMBOL_MAXLEN) {
 			fprintf(stderr, "Too long symbol!\n");
+			globals.error = ERR_PARSE;
 			return NULL;
 		}
 	}
@@ -533,6 +734,7 @@ struct expr *read_string(const char *text, const char **endptr)
 		if (!*text) {
 			free(str_buf);
 			fprintf(stderr, "Unexpected end of input!\n");
+			globals.error = ERR_PARSE;
 			return NULL;
 		}
 		if (i + 1 >= buf_len) {
@@ -564,7 +766,7 @@ struct expr *read_number(const char *text, const char **endptr)
  * last read character in endptr, if it is non-null.
  */
 struct expr *read_expr(const char *text, const char **endptr) {
-	struct expr *e;
+	struct expr *e = NULL;
 	text = skip_spaces(text);
 	if (*text == '(') {
 		e = read_list(text, &text);
@@ -572,8 +774,11 @@ struct expr *read_expr(const char *text, const char **endptr) {
 		e = read_string(text + 1, &text);
 	} else if (isdigit(*text)) {
 		e = read_number(text, &text);
-	} else {
+	} else if (is_symbol_char(*text)) {
 		e = read_symbol(text, &text);
+	} else {
+		fprintf(stderr, "No parse for \"%s\"!\n", text);
+		globals.error = ERR_PARSE;
 	}
 	if (endptr)
 		*endptr = text;
@@ -600,6 +805,7 @@ struct expr *list_index(struct expr *list, unsigned int idx)
 	while (idx > 0) {
 		if (!list) {
 			fprintf(stderr, "Index out of range!\n");
+			globals.error = ERR_USER;
 			return NULL;
 		}
 		assert(list->type == T_PAIR);
@@ -610,7 +816,8 @@ struct expr *list_index(struct expr *list, unsigned int idx)
 }
 
 /* Check that the correct number of arguments were passed.
- * Returns zero on success.
+ * Prints an error message, sets the global error state and returns non-zero
+ * if the number of arguments is incorrect.
  */
 int check_arg_count(struct expr *args, unsigned int argc)
 {
@@ -618,10 +825,98 @@ int check_arg_count(struct expr *args, unsigned int argc)
 	if (argc != len) {
 		fprintf(stderr,
 			"Invalid number of arguments: expected %u, got %u!\n",
-			argc, len);
+			argc,
+			len);
+		globals.error = ERR_USER;
 		return 1;
 	}
 	return 0;
+}
+
+/* Check that the expression has the correct type.
+ * Prints an error message, sets the global error state and returns non-zero
+ * if the expression has the wrong type.
+ */
+int check_type(struct expr *e, enum type t)
+{
+	if (!e) {
+		fprintf(stderr,
+			"Invalid type: expected %s, got nil!\n",
+			TYPE_NAMES[t]);
+		globals.error = ERR_USER;
+		return 1;
+	}
+	if (e->type != t) {
+		fprintf(stderr,
+			"Invalid type: expected %s, got %s!\n",
+			TYPE_NAMES[t],
+			TYPE_NAMES[e->type]);
+		globals.error = ERR_USER;
+		return 1;
+	}
+	return 0;
+}
+
+/* Built-in functions. */
+
+struct expr *bi_define(struct expr *args)
+{
+	struct expr *name;
+	struct expr *value;
+	if (check_arg_count(args, 2))
+		return NULL;
+	name = list_index(args, 0);
+	if (check_type(name, T_SYMBOL))
+		return NULL;
+	value = eval_expr(list_index(args, 1));
+	set_variable(name->data.symbol, value);
+	return NULL;
+}
+
+struct expr *bi_lambda(struct expr *args)
+{
+	struct expr *params;
+	struct expr *body;
+	if (check_arg_count(args, 2))
+		return NULL;
+	params = list_index(args, 0);
+	if (args->type != T_PAIR) {
+		fprintf(stderr, "Invalid parameter list ");
+		print_expr(params, stderr);
+		fprintf(stderr, "!\n");
+		globals.error = ERR_USER;
+		return NULL;
+	}
+	body = list_index(args, 1);
+	return make_lambda(params, body);
+}
+
+struct expr *bi_if(struct expr *args)
+{
+	/* TODO: create a type for booleans (and make numbers primitive) */
+	struct expr *test;
+	if (check_arg_count(args, 3))
+		return NULL;
+	test = eval_expr(list_index(args, 0));
+	if (check_type(test, T_SYMBOL))
+		return NULL;
+	if (test->data.symbol == globals.TRUE->data.symbol) {
+		return eval_expr(list_index(args, 1));
+	} else if (test->data.symbol == globals.FALSE->data.symbol) {
+		return eval_expr(list_index(args, 2));
+	} else {
+		fprintf(stderr, "Invalid truth value: ");
+		print_expr(test, stderr);
+		globals.error = ERR_USER;
+		return NULL;
+	}
+}
+
+struct expr *bi_apply(struct expr *args)
+{
+	if (check_arg_count(args, 2))
+		return NULL;
+	return eval_funcall(list_index(args, 0), list_index(args, 1));
 }
 
 struct expr *bi_quote(struct expr *args)
@@ -645,10 +940,8 @@ struct expr *bi_car(struct expr *args)
 	if (check_arg_count(args, 1))
 		return NULL;
 	e = list_index(args, 0);
-	if (!e || e->type != T_PAIR) {
-		fprintf(stderr, "Taking car of non-pair!\n");
+	if (check_type(e, T_PAIR))
 		return NULL;
-	}
 	return e->data.pair.car;
 }
 
@@ -658,21 +951,30 @@ struct expr *bi_cdr(struct expr *args)
 	if (check_arg_count(args, 1))
 		return NULL;
 	e = list_index(args, 0);
-	if (!e || e->type != T_PAIR) {
-		fprintf(stderr, "Taking cdr of non-pair!\n");
+        if (check_type(e, T_PAIR))
 		return NULL;
-	}
 	return e->data.pair.cdr;
 }
 
 struct expr *bi_eq(struct expr *args)
 {
+	struct expr *x;
+	struct expr *y;
 	if (check_arg_count(args, 2))
 		return NULL;
-	if (list_index(args, 0) == list_index(args, 1))
-		return make_number(1);
+	x = list_index(args, 0);
+	y = list_index(args, 1);
+	if (x == y)
+		/* handles reference equality and symbols */
+		return globals.TRUE;
+	else if (x && y
+		 && x->type == T_NUMBER
+		 && y->type == T_NUMBER
+		 && x->data.number == y->data.number)
+		/* TODO handle numbers without pointers */
+		return globals.TRUE;
 	else
-		return make_number(0);
+		return globals.FALSE;
 }
 
 struct expr *bi_list(struct expr *args)
@@ -681,40 +983,166 @@ struct expr *bi_list(struct expr *args)
 	return args;
 }
 
+struct expr *bi_append(struct expr *args)
+{
+	struct expr *before;
+	struct expr *after;
+	struct expr *iter;
+	if (check_arg_count(args, 2))
+		return NULL;
+	before = list_index(args, 0);
+	after = list_index(args, 1);
+	if (!before)
+		return after;
+	before = expr_copy(before);
+	iter = before;
+	assert(iter->type == T_PAIR);
+	while (iter->data.pair.cdr) {
+		assert(iter->type == T_PAIR);
+		iter = iter->data.pair.cdr;
+	}
+	iter->data.pair.cdr = after;
+	return before;
+}
+
 struct expr *bi_sum(struct expr *args)
 {
-	double total = 0;
+	double tot = 0;
 	while (args) {
 		struct expr *num;
 		assert(args->type == T_PAIR);
 		num = args->data.pair.car;
-		if (num->type != T_NUMBER) {
-			fprintf(stderr, "Cannot sum non-number ");
-			print_expr(num, stderr);
-			fprintf(stderr, "!\n");
+		if (check_type(num, T_NUMBER))
 			return NULL;
-		}
-		total += num->data.number;
+		tot += num->data.number;
 		args = args->data.pair.cdr;
 	}
-	return make_number(total);
+	return make_number(tot);
 }
 
-struct expr *bi_define(struct expr *args)
+struct expr *bi_prod(struct expr *args)
 {
-	struct expr *name;
-	struct expr *value;
+	/* should be an exact copy of bi_sum, except the operator */
+	double tot = 1;
+	while (args) {
+		struct expr *num;
+		assert(args->type == T_PAIR);
+		num = args->data.pair.car;
+		if (check_type(num, T_NUMBER))
+			return NULL;
+		tot *= num->data.number;
+		args = args->data.pair.cdr;
+	}
+	return make_number(tot);
+}
+
+struct expr *bi_diff(struct expr *args)
+{
+	int first = 1;
+	double tot;
+	while (args) {
+		struct expr *num;
+		assert(args->type == T_PAIR);
+		num = args->data.pair.car;
+		if (check_type(num, T_NUMBER))
+			return NULL;
+		if (first) {
+			tot = num->data.number;
+			first = 0;
+		} else {
+			tot -= num->data.number;
+		}
+		args = args->data.pair.cdr;
+	}
+	return make_number(tot);
+}
+
+struct expr *bi_quot(struct expr *args)
+{
+	/* should be an exact copy of bi_diff, except the operator */
+	int first = 1;
+	double tot;
+	while (args) {
+		struct expr *num;
+		assert(args->type == T_PAIR);
+		num = args->data.pair.car;
+		if (check_type(num, T_NUMBER))
+			return NULL;
+		if (first) {
+			tot = num->data.number;
+			first = 0;
+		} else {
+			tot /= num->data.number;
+		}
+		args = args->data.pair.cdr;
+	}
+	return make_number(tot);
+}
+
+struct expr *bi_pow(struct expr *args)
+{
+	struct expr *base;
+	struct expr *expt;
 	if (check_arg_count(args, 2))
 		return NULL;
-	name = list_index(args, 0);
-	if (name->type != T_SYMBOL) {
-		fprintf(stderr, "Cannot define non-symbol ");
-		print_expr(name, stderr);
-		fprintf(stderr, "!\n");
+	base = list_index(args, 0);
+	expt = list_index(args, 1);
+	if (check_type(base, T_NUMBER) || check_type(expt, T_NUMBER))
 		return NULL;
+	return make_number(pow(base->data.number, expt->data.number));
+}
+
+struct expr *bi_and(struct expr *args)
+{
+	while (args) {
+		assert(args->type == T_PAIR);
+		if (eval_expr(args->data.pair.car)->data.symbol == globals.FALSE->data.symbol)
+			return globals.FALSE;
+		args = args->data.pair.cdr;
 	}
-	value = eval_expr(list_index(args, 1));
-	set_variable(name->data.symbol, value);
+	return globals.TRUE;
+}
+
+struct expr *bi_or(struct expr *args)
+{
+	while (args) {
+		assert(args->type == T_PAIR);
+		if (eval_expr(args->data.pair.car)->data.symbol == globals.TRUE->data.symbol)
+			return globals.TRUE;
+		args = args->data.pair.cdr;
+	}
+	return globals.FALSE;
+}
+
+struct expr *bi_pair(struct expr *args)
+{
+	struct expr *e;
+	if (check_arg_count(args, 1))
+		return NULL;
+	e = list_index(args, 0);
+	if (e && e->type == T_PAIR)
+		return globals.TRUE;
+	else
+		return globals.FALSE;
+}
+
+struct expr *bi_debug(struct expr *args)
+{
+	struct expr *e;
+	if (check_arg_count(args, 1))
+		return NULL;
+	e = list_index(args, 0);
+	if (check_type(e, T_SYMBOL))
+		return NULL;
+	if (e->data.symbol == globals.TRUE->data.symbol) {
+		globals.debug = 1;
+	} else if (e->data.symbol == globals.FALSE->data.symbol) {
+		globals.debug = 0;
+	} else {
+		fprintf(stderr, "Invalid truth value: ");
+		print_expr(e, stderr);
+		globals.error = ERR_USER;
+	}
 	return NULL;
 }
 
@@ -722,32 +1150,52 @@ struct expr *bi_define(struct expr *args)
 
 int main(int argc, char **argv)
 {
-	#ifndef USE_READLINE
+#ifndef USE_READLINE
 	char repl_buf[REPL_MAXLEN];
-	#endif
+#endif
 	if (argc > 1) {
 		printf("No args expected, got: %s ...", argv[0]);
 		return 1;
 	}
 
 	init_globals();
-
 	while (1) {
+		const char *endptr = NULL;
 		struct expr *e;
 		struct expr *r;
-		#ifdef USE_READLINE
+#ifdef USE_READLINE
 		char *repl_line = readline("> ");
-		e = read_expr(repl_line, NULL);
-		free(repl_line);
-		#else
+		e = read_expr(repl_line, &endptr);
+#else
 		printf("> ");
 		fgets(repl_buf, REPL_MAXLEN, stdin);
-		e = read_expr(repl_buf, NULL);
-		#endif
-		r = eval_expr(e);
-		print_expr(r, stdout);
-		putchar('\n');
-	}
+		e = read_expr(repl_buf, &endptr);
+#endif
+		if (globals.debug) {
+			fprintf(stderr, "Parsed expression: ");
+			print_expr(e, stderr);
+			putc('\n', stderr);
+		}
+		if (*skip_spaces(endptr)) {
+			fprintf(stderr, "Trailing text \"%s\"!\n", endptr);
+		} else {
+			r = eval_expr(e);
+			if (globals.error == ERR_NONE) {
+				if (globals.debug)
+					print_dbg_expr(r, stdout);
+				else
+					print_expr(r, stdout);
+				putchar('\n');
+#ifdef USE_READLINE
+				add_history(repl_line);
+				free(repl_line);
+#endif
 
+			} else {
+				/* error message has already been printed */
+				globals.error = ERR_NONE;
+			}
+		}
+	}
 	return 0;
 }
