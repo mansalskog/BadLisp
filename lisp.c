@@ -254,8 +254,9 @@ void free_unused()
 		size_t i;
 		size_t j = 0;
 		for (i = 0; i < globals.exprs_count; ++i) {
-			if (globals.exprs[i])
+			if (globals.exprs[i]) {
 				new_exprs[j++] = globals.exprs[i];
+			}
 		}
 		free(globals.exprs);
 		globals.exprs = new_exprs;
@@ -271,8 +272,9 @@ const char *save_symbol(const char *symbol)
 	char *found = NULL;
 	size_t i;
 	for (i = 0; i < globals.symbols_count; ++i) {
-		if (!strcmp(symbol, globals.symbols[i]))
+		if (!strcmp(symbol, globals.symbols[i])) {
 			found = globals.symbols[i];
+		}
 	}
 	if (!found) {
 		/* new symbol */
@@ -308,11 +310,13 @@ struct expr *make_pair(struct expr *car, struct expr *cdr)
 	e->refs = 0;
 	e->type = T_PAIR;
 	e->data.pair.car = car;
-	if (car)
+	if (car) {
 		++car->refs;
+	}
 	e->data.pair.cdr = cdr;
-	if (cdr)
+	if (cdr) {
 		++cdr->refs;
+	}
 	return e;
 }
 
@@ -361,13 +365,14 @@ struct expr *get_variable(const char *symbol)
 			return v->value;
 		} else {
 			int c = strcmp(symbol, v->symbol);
-			if (c < 0)
+			if (c < 0) {
 				v = v->left;
-		        else if (c > 0)
+			} else if (c > 0) {
 				v = v->right;
-			/* symbols should not be equal if pointers differ */
-			else
+			} else {
+				/* symbols should not be equal if pointers differ */
 				assert(0);
+			}
 		}
 	}
 	fprintf(stderr, "Undefined variable %s!\n", symbol);
@@ -385,16 +390,18 @@ void set_variable(const char *symbol, struct expr *value)
 			break;
 		} else {
 			int c = strcmp(symbol, (*v)->symbol);
-			if (c < 0)
+			if (c < 0) {
 				v = &(*v)->left;
-			else if (c > 0)
+			} else if (c > 0) {
 				v = &(*v)->right;
-			/* symbols should not be equal if pointers differ */
-			else
+			} else {
+				/* symbols should not be equal if pointers differ */
 				assert(0);
+			}
 			/* if empty leaf reached */
-			if (!*v)
+			if (!*v) {
 				break;
+			}
 		}
 	}
 	if (*v) {
@@ -444,8 +451,9 @@ void create_function(const char *symbol, const char *params, const char *body)
  */
 struct expr *expr_copy(struct expr *e)
 {
-	if (!e)
+	if (!e) {
 		return NULL;
+	}
 	switch (e->type) {
 	case T_SYMBOL:
 	case T_NUMBER:
@@ -457,6 +465,9 @@ struct expr *expr_copy(struct expr *e)
 	case T_PAIR:
 		return make_pair(expr_copy(e->data.pair.car),
 				 expr_copy(e->data.pair.cdr));
+	default:
+		/* invalid type */
+		assert(0);
 	}
 }
 
@@ -465,8 +476,9 @@ struct expr *expr_copy(struct expr *e)
  */
 struct expr *replace_symbol(struct expr *exp, const char *sym, struct expr *val)
 {
-	if (!exp)
+	if (!exp) {
 		return NULL;
+	}
 	if (exp->type == T_SYMBOL) {
 		if (exp->data.symbol == sym) {
 			if (val && val->type == T_PAIR) {
@@ -482,13 +494,14 @@ struct expr *replace_symbol(struct expr *exp, const char *sym, struct expr *val)
 	} else if (exp->type == T_PAIR) {
 		struct expr *car = replace_symbol(exp->data.pair.car, sym, val);
 		struct expr *cdr = replace_symbol(exp->data.pair.cdr, sym, val);
-		if (car != exp->data.pair.car || cdr != exp->data.pair.cdr)
+		if (car != exp->data.pair.car || cdr != exp->data.pair.cdr) {
 			/* if car or cdr changed, we need to
 			   construct a new pair */
 			/* TODO reference counting */
 			return make_pair(car, cdr);
-		else
+		} else {
 			return exp;
+		}
 	} else {
 		return exp;
 	}
@@ -514,8 +527,9 @@ struct expr *eval_lambda(struct lambda *lambda, struct expr *args)
 	struct expr *result = lambda->body;
 	struct expr *param = lambda->params;
 	unsigned int param_count = list_length(lambda->params);
-	if (check_arg_count(args, param_count))
+	if (check_arg_count(args, param_count)) {
 		return NULL;
+	}
 	while (param) {
 		/* replace a single parameter with its argument value */
 		struct expr *sym;
@@ -545,8 +559,9 @@ struct expr *eval_funcall(struct expr *f, struct expr *args)
 	} if (f->type == T_BUILTIN) {
 		/* if it's not a special form
 		   the arguments are evaluated if non-null */
-		if (!f->data.builtin.spec_form)
+		if (!f->data.builtin.spec_form) {
 			args = eval_each(args);
+		}
 		return f->data.builtin.func(args);
 	} else if (f->type == T_LAMBDA) {
 		args = eval_each(args);
@@ -601,8 +616,9 @@ void print_expr(struct expr *e, FILE *f)
 			while (e && e->type == T_PAIR) {
 				print_expr(e->data.pair.car, f);
 				e = e->data.pair.cdr;
-				if (e && e->type == T_PAIR)
+				if (e && e->type == T_PAIR) {
 					putc(' ', f);
+				}
 			}
 			if (e) {
 				/* print trailing element */
@@ -680,10 +696,12 @@ struct expr *read_list(const char *text, const char **endptr)
 	}
 	/* skip the trailing ')' */
 	++text;
-	if (e)
+	if (e) {
 		e->refs = 0;
-	if (endptr)
+	}
+	if (endptr) {
 		*endptr = text;
+	}
 	return e;
 }
 
@@ -716,8 +734,9 @@ struct expr *read_symbol(const char *text, const char **endptr)
 		}
 	}
 	buf[i] = '\0';
-	if (endptr)
+	if (endptr) {
 		*endptr = text;
+	}
 	symbol = make_symbol(buf);
 	return symbol;
 }
@@ -738,14 +757,21 @@ struct expr *read_string(const char *text, const char **endptr)
 			return NULL;
 		}
 		if (i + 1 >= buf_len) {
+			char *new_str_buf;
 			buf_len *= 2;
-			str_buf = realloc(str_buf, buf_len);
+			new_str_buf = realloc(str_buf, buf_len);
+			if (!new_str_buf) {
+				fprintf(stderr, "Cannot allocate input buffer!\n");
+				return NULL;
+			}
+			str_buf = new_str_buf;
 		}
 		str_buf[i++] = *text++;
 	}
 	str_buf[i] = '\0';
-	if (endptr)
+	if (endptr) {
 		*endptr = text + 1;
+	}
 	string = make_string(str_buf, i + 1);
 	free(str_buf);
 	return string;
@@ -757,8 +783,9 @@ struct expr *read_number(const char *text, const char **endptr)
 {
 	struct expr *number;
 	number = make_number(strtod(text, (char **) &text));
-	if (endptr)
+	if (endptr) {
 		*endptr = text;
+	}
 	return number;
 }
 
@@ -780,8 +807,9 @@ struct expr *read_expr(const char *text, const char **endptr) {
 		fprintf(stderr, "No parse for \"%s\"!\n", text);
 		globals.error = ERR_PARSE;
 	}
-	if (endptr)
+	if (endptr) {
 		*endptr = text;
+	}
 	return e;
 }
 
@@ -863,11 +891,13 @@ struct expr *bi_define(struct expr *args)
 {
 	struct expr *name;
 	struct expr *value;
-	if (check_arg_count(args, 2))
+	if (check_arg_count(args, 2)) {
 		return NULL;
+	}
 	name = list_index(args, 0);
-	if (check_type(name, T_SYMBOL))
+	if (check_type(name, T_SYMBOL)) {
 		return NULL;
+	}
 	value = eval_expr(list_index(args, 1));
 	set_variable(name->data.symbol, value);
 	return NULL;
@@ -877,8 +907,9 @@ struct expr *bi_lambda(struct expr *args)
 {
 	struct expr *params;
 	struct expr *body;
-	if (check_arg_count(args, 2))
+	if (check_arg_count(args, 2)) {
 		return NULL;
+	}
 	params = list_index(args, 0);
 	if (args->type != T_PAIR) {
 		fprintf(stderr, "Invalid parameter list ");
@@ -895,12 +926,13 @@ struct expr *bi_if(struct expr *args)
 {
 	/* TODO: create a type for booleans (and make numbers primitive) */
 	struct expr *test;
-	if (check_arg_count(args, 3))
+	if (check_arg_count(args, 3)) {
 		return NULL;
+	}
 	test = eval_expr(list_index(args, 0));
-	if (check_type(test, T_SYMBOL))
+	if (check_type(test, T_SYMBOL)) {
 		return NULL;
-	if (test->data.symbol == globals.TRUE->data.symbol) {
+	} else if (test->data.symbol == globals.TRUE->data.symbol) {
 		return eval_expr(list_index(args, 1));
 	} else if (test->data.symbol == globals.FALSE->data.symbol) {
 		return eval_expr(list_index(args, 2));
@@ -914,22 +946,25 @@ struct expr *bi_if(struct expr *args)
 
 struct expr *bi_apply(struct expr *args)
 {
-	if (check_arg_count(args, 2))
+	if (check_arg_count(args, 2)) {
 		return NULL;
+	}
 	return eval_funcall(list_index(args, 0), list_index(args, 1));
 }
 
 struct expr *bi_quote(struct expr *args)
 {
-	if (check_arg_count(args, 1))
+	if (check_arg_count(args, 1)) {
 		return NULL;
+	}
 	return list_index(args, 0);
 }
 
 struct expr *bi_cons(struct expr *args)
 {
-	if (check_arg_count(args, 2))
+	if (check_arg_count(args, 2)) {
 		return NULL;
+	}
 	return make_pair(list_index(args, 0),
 			 list_index(args, 1));
 }
@@ -937,22 +972,26 @@ struct expr *bi_cons(struct expr *args)
 struct expr *bi_car(struct expr *args)
 {
 	struct expr *e;
-	if (check_arg_count(args, 1))
+	if (check_arg_count(args, 1)) {
 		return NULL;
+	}
 	e = list_index(args, 0);
-	if (check_type(e, T_PAIR))
+	if (check_type(e, T_PAIR)) {
 		return NULL;
+	}
 	return e->data.pair.car;
 }
 
 struct expr *bi_cdr(struct expr *args)
 {
 	struct expr *e;
-	if (check_arg_count(args, 1))
+	if (check_arg_count(args, 1)) {
 		return NULL;
+	}
 	e = list_index(args, 0);
-        if (check_type(e, T_PAIR))
+        if (check_type(e, T_PAIR)) {
 		return NULL;
+	}
 	return e->data.pair.cdr;
 }
 
@@ -960,21 +999,23 @@ struct expr *bi_eq(struct expr *args)
 {
 	struct expr *x;
 	struct expr *y;
-	if (check_arg_count(args, 2))
+	if (check_arg_count(args, 2)) {
 		return NULL;
+	}
 	x = list_index(args, 0);
 	y = list_index(args, 1);
-	if (x == y)
+	if (x == y) {
 		/* handles reference equality and symbols */
 		return globals.TRUE;
-	else if (x && y
-		 && x->type == T_NUMBER
-		 && y->type == T_NUMBER
-		 && x->data.number == y->data.number)
+	} else if (x && y
+		   && x->type == T_NUMBER
+		   && y->type == T_NUMBER
+		   && x->data.number == y->data.number) {
 		/* TODO handle numbers without pointers */
 		return globals.TRUE;
-	else
+	} else {
 		return globals.FALSE;
+	}
 }
 
 struct expr *bi_list(struct expr *args)
@@ -988,12 +1029,14 @@ struct expr *bi_append(struct expr *args)
 	struct expr *before;
 	struct expr *after;
 	struct expr *iter;
-	if (check_arg_count(args, 2))
+	if (check_arg_count(args, 2)) {
 		return NULL;
+	}
 	before = list_index(args, 0);
 	after = list_index(args, 1);
-	if (!before)
+	if (!before) {
 		return after;
+	}
 	before = expr_copy(before);
 	iter = before;
 	assert(iter->type == T_PAIR);
@@ -1012,8 +1055,9 @@ struct expr *bi_sum(struct expr *args)
 		struct expr *num;
 		assert(args->type == T_PAIR);
 		num = args->data.pair.car;
-		if (check_type(num, T_NUMBER))
+		if (check_type(num, T_NUMBER)) {
 			return NULL;
+		}
 		tot += num->data.number;
 		args = args->data.pair.cdr;
 	}
@@ -1028,8 +1072,9 @@ struct expr *bi_prod(struct expr *args)
 		struct expr *num;
 		assert(args->type == T_PAIR);
 		num = args->data.pair.car;
-		if (check_type(num, T_NUMBER))
+		if (check_type(num, T_NUMBER)) {
 			return NULL;
+		}
 		tot *= num->data.number;
 		args = args->data.pair.cdr;
 	}
@@ -1039,13 +1084,14 @@ struct expr *bi_prod(struct expr *args)
 struct expr *bi_diff(struct expr *args)
 {
 	int first = 1;
-	double tot;
+	double tot = 0.0;
 	while (args) {
 		struct expr *num;
 		assert(args->type == T_PAIR);
 		num = args->data.pair.car;
-		if (check_type(num, T_NUMBER))
+		if (check_type(num, T_NUMBER)) {
 			return NULL;
+		}
 		if (first) {
 			tot = num->data.number;
 			first = 0;
@@ -1061,13 +1107,14 @@ struct expr *bi_quot(struct expr *args)
 {
 	/* should be an exact copy of bi_diff, except the operator */
 	int first = 1;
-	double tot;
+	double tot = 0.0;
 	while (args) {
 		struct expr *num;
 		assert(args->type == T_PAIR);
 		num = args->data.pair.car;
-		if (check_type(num, T_NUMBER))
+		if (check_type(num, T_NUMBER)) {
 			return NULL;
+		}
 		if (first) {
 			tot = num->data.number;
 			first = 0;
@@ -1083,12 +1130,14 @@ struct expr *bi_pow(struct expr *args)
 {
 	struct expr *base;
 	struct expr *expt;
-	if (check_arg_count(args, 2))
+	if (check_arg_count(args, 2)) {
 		return NULL;
+	}
 	base = list_index(args, 0);
 	expt = list_index(args, 1);
-	if (check_type(base, T_NUMBER) || check_type(expt, T_NUMBER))
+	if (check_type(base, T_NUMBER) || check_type(expt, T_NUMBER)) {
 		return NULL;
+	}
 	return make_number(pow(base->data.number, expt->data.number));
 }
 
@@ -1096,10 +1145,12 @@ struct expr *bi_and(struct expr *args)
 {
 	while (args) {
 		assert(args->type == T_PAIR);
-		if (eval_expr(args->data.pair.car)->data.symbol == globals.FALSE->data.symbol)
+		if (eval_expr(args->data.pair.car)->data.symbol == globals.FALSE->data.symbol) {
 			return globals.FALSE;
+		}
 		args = args->data.pair.cdr;
 	}
+	/* and of empty list is true */
 	return globals.TRUE;
 }
 
@@ -1107,33 +1158,39 @@ struct expr *bi_or(struct expr *args)
 {
 	while (args) {
 		assert(args->type == T_PAIR);
-		if (eval_expr(args->data.pair.car)->data.symbol == globals.TRUE->data.symbol)
+		if (eval_expr(args->data.pair.car)->data.symbol == globals.TRUE->data.symbol) {
 			return globals.TRUE;
+		}
 		args = args->data.pair.cdr;
 	}
+	/* or of empty list is false */
 	return globals.FALSE;
 }
 
 struct expr *bi_pair(struct expr *args)
 {
 	struct expr *e;
-	if (check_arg_count(args, 1))
+	if (check_arg_count(args, 1)) {
 		return NULL;
+	}
 	e = list_index(args, 0);
-	if (e && e->type == T_PAIR)
+	if (e && e->type == T_PAIR) {
 		return globals.TRUE;
-	else
+	} else {
 		return globals.FALSE;
+	}
 }
 
 struct expr *bi_debug(struct expr *args)
 {
 	struct expr *e;
-	if (check_arg_count(args, 1))
+	if (check_arg_count(args, 1)) {
 		return NULL;
+	}
 	e = list_index(args, 0);
-	if (check_type(e, T_SYMBOL))
+	if (check_type(e, T_SYMBOL)) {
 		return NULL;
+	}
 	if (e->data.symbol == globals.TRUE->data.symbol) {
 		globals.debug = 1;
 	} else if (e->data.symbol == globals.FALSE->data.symbol) {
@@ -1181,10 +1238,11 @@ int main(int argc, char **argv)
 		} else {
 			r = eval_expr(e);
 			if (globals.error == ERR_NONE) {
-				if (globals.debug)
+				if (globals.debug) {
 					print_dbg_expr(r, stdout);
-				else
+				} else {
 					print_expr(r, stdout);
+				}
 				putchar('\n');
 #ifdef USE_READLINE
 				add_history(repl_line);
